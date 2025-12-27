@@ -1,4 +1,6 @@
 mod actions;
+#[cfg(target_os = "android")]
+mod android;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod apple_intelligence;
 mod audio_feedback;
@@ -110,9 +112,19 @@ fn show_main_window(app: &AppHandle) {
 }
 
 fn initialize_core_logic(app_handle: &AppHandle) {
-    // Initialize the input state (Enigo singleton for keyboard/mouse simulation)
-    let enigo_state = input::EnigoState::new().expect("Failed to initialize input state (Enigo)");
-    app_handle.manage(enigo_state);
+    // Initialize Android-specific features
+    #[cfg(target_os = "android")]
+    {
+        android::initialize_android_features(app_handle);
+    }
+
+    // Initialize desktop-only features
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        // Initialize the input state (Enigo singleton for keyboard/mouse simulation)
+        let enigo_state = input::EnigoState::new().expect("Failed to initialize input state (Enigo)");
+        app_handle.manage(enigo_state);
+    }
 
     // Initialize the managers
     let recording_manager = Arc::new(
@@ -133,84 +145,88 @@ fn initialize_core_logic(app_handle: &AppHandle) {
     app_handle.manage(transcription_manager.clone());
     app_handle.manage(history_manager.clone());
 
-    // Initialize the shortcuts
-    shortcut::init_shortcuts(app_handle);
-
-    #[cfg(unix)]
-    let signals = Signals::new(&[SIGUSR2]).unwrap();
-    // Set up SIGUSR2 signal handler for toggling transcription
-    #[cfg(unix)]
-    signal_handle::setup_signal_handler(app_handle.clone(), signals);
-
-    // Apply macOS Accessory policy if starting hidden
-    #[cfg(target_os = "macos")]
+    // Desktop-only initialization
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        let settings = settings::get_settings(app_handle);
-        if settings.start_hidden {
-            let _ = app_handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
+        // Initialize the shortcuts
+        shortcut::init_shortcuts(app_handle);
+
+        #[cfg(unix)]
+        let signals = Signals::new(&[SIGUSR2]).unwrap();
+        // Set up SIGUSR2 signal handler for toggling transcription
+        #[cfg(unix)]
+        signal_handle::setup_signal_handler(app_handle.clone(), signals);
+
+        // Apply macOS Accessory policy if starting hidden
+        #[cfg(target_os = "macos")]
+        {
+            let settings = settings::get_settings(app_handle);
+            if settings.start_hidden {
+                let _ = app_handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
         }
-    }
-    // Get the current theme to set the appropriate initial icon
-    let initial_theme = tray::get_current_theme(app_handle);
+        // Get the current theme to set the appropriate initial icon
+        let initial_theme = tray::get_current_theme(app_handle);
 
-    // Choose the appropriate initial icon based on theme
-    let initial_icon_path = tray::get_icon_path(initial_theme, tray::TrayIconState::Idle);
+        // Choose the appropriate initial icon based on theme
+        let initial_icon_path = tray::get_icon_path(initial_theme, tray::TrayIconState::Idle);
 
-    let tray = TrayIconBuilder::new()
-        .icon(
-            Image::from_path(
-                app_handle
-                    .path()
-                    .resolve(initial_icon_path, tauri::path::BaseDirectory::Resource)
-                    .unwrap(),
+        let tray = TrayIconBuilder::new()
+            .icon(
+                Image::from_path(
+                    app_handle
+                        .path()
+                        .resolve(initial_icon_path, tauri::path::BaseDirectory::Resource)
+                        .unwrap(),
+                )
+                .unwrap(),
             )
-            .unwrap(),
-        )
-        .show_menu_on_left_click(true)
-        .icon_as_template(true)
-        .on_menu_event(|app, event| match event.id.as_ref() {
-            "settings" => {
-                show_main_window(app);
-            }
-            "check_updates" => {
-                let settings = settings::get_settings(app);
-                if settings.update_checks_enabled {
+            .show_menu_on_left_click(true)
+            .icon_as_template(true)
+            .on_menu_event(|app, event| match event.id.as_ref() {
+                "settings" => {
                     show_main_window(app);
-                    let _ = app.emit("check-for-updates", ());
                 }
-            }
-            "cancel" => {
-                use crate::utils::cancel_current_operation;
+                "check_updates" => {
+                    let settings = settings::get_settings(app);
+                    if settings.update_checks_enabled {
+                        show_main_window(app);
+                        let _ = app.emit("check-for-updates", ());
+                    }
+                }
+                "cancel" => {
+                    use crate::utils::cancel_current_operation;
 
-                // Use centralized cancellation that handles all operations
-                cancel_current_operation(app);
-            }
-            "quit" => {
-                app.exit(0);
-            }
-            _ => {}
-        })
-        .build(app_handle)
-        .unwrap();
-    app_handle.manage(tray);
+                    // Use centralized cancellation that handles all operations
+                    cancel_current_operation(app);
+                }
+                "quit" => {
+                    app.exit(0);
+                }
+                _ => {}
+            })
+            .build(app_handle)
+            .unwrap();
+        app_handle.manage(tray);
 
-    // Initialize tray menu with idle state
-    utils::update_tray_menu(app_handle, &utils::TrayIconState::Idle, None);
+        // Initialize tray menu with idle state
+        utils::update_tray_menu(app_handle, &utils::TrayIconState::Idle, None);
 
-    // Get the autostart manager and configure based on user setting
-    let autostart_manager = app_handle.autolaunch();
-    let settings = settings::get_settings(&app_handle);
+        // Get the autostart manager and configure based on user setting
+        let autostart_manager = app_handle.autolaunch();
+        let settings = settings::get_settings(&app_handle);
 
-    if settings.autostart_enabled {
-        // Enable autostart if user has opted in
-        let _ = autostart_manager.enable();
-    } else {
-        // Disable autostart if user has opted out
-        let _ = autostart_manager.disable();
+        if settings.autostart_enabled {
+            // Enable autostart if user has opted in
+            let _ = autostart_manager.enable();
+        } else {
+            // Disable autostart if user has opted out
+            let _ = autostart_manager.disable();
+        }
+
+        // Create the recording overlay window (hidden by default)
+        utils::create_recording_overlay(app_handle);
     }
-
-    // Create the recording overlay window (hidden by default)
-    utils::create_recording_overlay(app_handle);
 }
 
 #[tauri::command]
